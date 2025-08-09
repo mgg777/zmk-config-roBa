@@ -1,6 +1,14 @@
 name: Reusable user config build
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'config/**'
+      - 'build.yaml'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+  
   workflow_call:
     inputs:
       build_matrix_path:
