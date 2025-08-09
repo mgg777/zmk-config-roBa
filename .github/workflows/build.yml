@@ -105,13 +105,13 @@ jobs:
         working-directory: ${{ env.base_dir }}
         run: west zephyr-export
 
-      # ← 毎回クリーンビルドで .config を確実に生成
+      # 毎回クリーンビルドして .config を必ず生成
       - name: West Build (${{ env.display_name }})
         working-directory: ${{ env.base_dir }}
         shell: sh -x {0}
         run: west build -p always -s zmk/app -d "${{ env.build_dir }}" -b "${{ matrix.board }}" ${{ env.extra_west_args }} -- -DZMK_CONFIG=${{ env.base_dir }}/config ${{ env.extra_cmake_args }} ${{ matrix.cmake-args }}
 
-      # ログでも最終 .config を確認できる
+      # ログでも .config の抜粋を確認
       - name: Show Kconfig (final .config)
         if: ${{ !cancelled() }}
         run: |
@@ -131,15 +131,29 @@ jobs:
             cp "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.${{ inputs.fallback_binary }}"
           fi
 
-      # ← ここで .config をアーティファクトに保存（パス候補を広めに）
-      - name: Upload .config (try common paths)
+      # ここで .config の実体を探してからアップロード
+      - name: Locate .config
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "build_dir=${{ env.build_dir }}"
+          FOUND=$(find "${{ env.build_dir }}" -type f -name ".config" | head -n1 || true)
+          if [[ -n "$FOUND" ]]; then
+            echo "config_path=$FOUND" >> $GITHUB_ENV
+            echo "Found .config at: $FOUND"
+            grep -E "CONFIG_ZMK_(MOUSE_AUTOMATIC_LAYER|POINTING_DEVICE_AUTO_MOUSE_LAYER)=" "$FOUND" || true
+          else
+            echo "config_path=" >> $GITHUB_ENV
+            echo "No .config found under ${{ env.build_dir }}"
+          fi
+
+      - name: Upload .config
+        if: ${{ env.config_path != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: config-${{ env.artifact_name }}
-          path: |
-            ${{ env.build_dir }}/zephyr/.config
-            ${{ env.build_dir }}/.config
-            ${{ env.build_dir }}/zephyr/zephyr/.config
+          path: ${{ env.config_path }}
           if-no-files-found: warn
 
       - name: Archive (${{ env.display_name }})
