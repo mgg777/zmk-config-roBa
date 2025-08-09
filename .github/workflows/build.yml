@@ -1,4 +1,4 @@
-name: User config build (with .config)
+name: User config build (dump build tree + .config)
 
 on:
   push:
@@ -105,39 +105,25 @@ jobs:
         working-directory: ${{ env.base_dir }}
         run: west zephyr-export
 
-      # 毎回クリーンビルドして .config を必ず生成
+      # 毎回クリーンビルドして .config を確実に生成させる
       - name: West Build (${{ env.display_name }})
         working-directory: ${{ env.base_dir }}
         shell: sh -x {0}
         run: west build -p always -s zmk/app -d "${{ env.build_dir }}" -b "${{ matrix.board }}" ${{ env.extra_west_args }} -- -DZMK_CONFIG=${{ env.base_dir }}/config ${{ env.extra_cmake_args }} ${{ matrix.cmake-args }}
 
-      # ログでも .config の抜粋を確認
-      - name: Show Kconfig (final .config)
-        if: ${{ !cancelled() }}
+      # どこに出来たかを一覧
+      - name: List build tree (top)
         run: |
-          if [ -f "${{ env.build_dir }}/zephyr/.config" ]; then
-            grep -v -e "^#" -e "^$" "${{ env.build_dir }}/zephyr/.config" | sort | sed -n '1,200p'
-          else
-            echo "No Kconfig output"
-          fi
+          echo "BUILD_DIR=${{ env.build_dir }}"
+          ls -la "${{ env.build_dir }}"
+          echo "----"
+          ls -la "${{ env.build_dir }}/zephyr" || true
 
-      - name: Rename artifacts
-        shell: sh -x {0}
-        run: |
-          mkdir "${{ env.build_dir }}/artifacts"
-          if [ -f "${{ env.build_dir }}/zephyr/zmk.uf2" ]; then
-            cp "${{ env.build_dir }}/zephyr/zmk.uf2" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.uf2"
-          elif [ -f "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" ]; then
-            cp "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.${{ inputs.fallback_binary }}"
-          fi
-
-      # ここで .config の実体を探してからアップロード
+      # .config を探してパスを環境変数に格納し、抜粋をログに出す
       - name: Locate .config
-        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          echo "build_dir=${{ env.build_dir }}"
           FOUND=$(find "${{ env.build_dir }}" -type f -name ".config" | head -n1 || true)
           if [[ -n "$FOUND" ]]; then
             echo "config_path=$FOUND" >> $GITHUB_ENV
@@ -148,12 +134,32 @@ jobs:
             echo "No .config found under ${{ env.build_dir }}"
           fi
 
+      # 見つかった .config を単体でアップロード
       - name: Upload .config
         if: ${{ env.config_path != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: config-${{ env.artifact_name }}
           path: ${{ env.config_path }}
+          if-no-files-found: warn
+
+      # UF2/BIN をわかりやすい名前でまとめる
+      - name: Rename artifacts
+        shell: sh -x {0}
+        run: |
+          mkdir "${{ env.build_dir }}/artifacts"
+          if [ -f "${{ env.build_dir }}/zephyr/zmk.uf2" ]; then
+            cp "${{ env.build_dir }}/zephyr/zmk.uf2" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.uf2"
+          elif [ -f "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" ]; then
+            cp "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.${{ inputs.fallback_binary }}"
+          fi
+
+      # 念のため zephyr ディレクトリを丸ごと保存（ここに .config が必ず含まれるはず）
+      - name: Upload build tree (zephyr dir)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-tree-${{ env.artifact_name }}
+          path: ${{ env.build_dir }}/zephyr/**
           if-no-files-found: warn
 
       - name: Archive (${{ env.display_name }})
