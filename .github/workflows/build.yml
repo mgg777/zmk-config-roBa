@@ -1,156 +1,68 @@
-name: User config build (with .config)
+name: Build ZMK Firmware
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - 'config/**'
-      - 'build.yaml'
-      - '.github/workflows/build.yml'
+  pull_request:
   workflow_dispatch:
 
 jobs:
-  matrix:
-    runs-on: ubuntu-22.04
-    name: Fetch Build Keyboards
-    outputs:
-      build_matrix: ${{ env.build_matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Fetch Build Matrix
-        run: |
-          echo "build_matrix=$(yq -oj -I0 'build.yaml')" >> $GITHUB_ENV
-          yq -oj 'build.yaml'
-
   build:
+    uses: zmkfirmware/zmk/.github/workflows/build-user-config.yml@main
+
+  # ↓ 追加ジョブで .config を保存する処理をオーバーライド
+  build-with-config:
     runs-on: ubuntu-latest
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    needs: matrix
-    name: Build
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.build_matrix) }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Create build directory
-        run: |
-          echo "build_dir=$(mktemp -d)" >> $GITHUB_ENV
-
-      - name: Prepare variables
-        shell: sh -x {0}
-        env:
-          board: ${{ matrix.board }}
-          shield: ${{ matrix.shield }}
-          artifact_name: ${{ matrix.artifact-name }}
-          snippet: ${{ matrix.snippet }}
-        run: |
-          if [ -e zephyr/module.yml ]; then
-            export zmk_load_arg=" -DZMK_EXTRA_MODULES='${GITHUB_WORKSPACE}'"
-            new_tmp_dir="${TMPDIR:-/tmp}/zmk-config"
-            mkdir -p "${new_tmp_dir}"
-            echo "base_dir=${new_tmp_dir}" >> $GITHUB_ENV
-          else
-            echo "base_dir=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-          fi
-
-          if [ -n "${snippet}" ]; then
-            extra_west_args="-S \"${snippet}\""
-          fi
-
-          echo "zephyr_version=${ZEPHYR_VERSION}" >> $GITHUB_ENV
-          echo "extra_west_args=${extra_west_args}" >> $GITHUB_ENV
-          echo "extra_cmake_args=${shield:+-DSHIELD=\"$shield\"}${zmk_load_arg}" >> $GITHUB_ENV
-          echo "display_name=${shield:+$shield - }${board}" >> $GITHUB_ENV
-          echo "artifact_name=${artifact_name:-${shield:+$shield-}${board}-zmk}" >> $GITHUB_ENV
-
-      - name: Copy config files to isolated temporary directory
-        run: |
-          if [ "${{ env.base_dir }}" != "${GITHUB_WORKSPACE}" ]; then
-            mkdir "${{ env.base_dir }}/config"
-            cp -R config/* "${{ env.base_dir }}/config/"
-          fi
-
-      - name: Cache west modules
-        uses: actions/cache@v4
-        continue-on-error: true
-        env:
-          cache_name: cache-zephyr-${{ env.zephyr_version }}-modules
-        with:
-          path: |
-            ${{ env.base_dir }}/modules/
-            ${{ env.base_dir }}/tools/
-            ${{ env.base_dir }}/zephyr/
-            ${{ env.base_dir }}/bootloader/
-            ${{ env.base_dir }}/zmk/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('**/west.yml', '**/build.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
-            ${{ runner.os }}-build-
-            ${{ runner.os }}-
+        run: echo "build_dir=$(mktemp -d)" >> $GITHUB_ENV
 
       - name: West Init
-        working-directory: ${{ env.base_dir }}
-        run: west init -l "${{ env.base_dir }}/config"
+        run: west init -l config
 
       - name: West Update
-        working-directory: ${{ env.base_dir }}
         run: west update --fetch-opt=--filter=tree:0
 
       - name: West Zephyr export
-        working-directory: ${{ env.base_dir }}
         run: west zephyr-export
 
-      - name: West Build (${{ env.display_name }})
-        working-directory: ${{ env.base_dir }}
-        shell: sh -x {0}
-        run: west build -s zmk/app -d "${{ env.build_dir }}" -b "${{ matrix.board }}" ${{ env.extra_west_args }} -- -DZMK_CONFIG=${{ env.base_dir }}/config ${{ env.extra_cmake_args }} ${{ matrix.cmake-args }}
+      - name: West Build (force pristine)
+        run: |
+          west build -p always -s zmk/app -d "${{ env.build_dir }}" -b seeeduino_xiao_ble -- -DZMK_CONFIG=${{ github.workspace }}/config
 
-      - name: Show Kconfig (final .config)
-        if: ${{ !cancelled() }}
+      - name: Show Kconfig (.config content)
         run: |
           if [ -f "${{ env.build_dir }}/zephyr/.config" ]; then
-            grep -v -e "^#" -e "^$" "${{ env.build_dir }}/zephyr/.config" | sort | sed -n '1,200p'
+            grep -v -e "^#" -e "^$" "${{ env.build_dir }}/zephyr/.config" | sort
           else
             echo "No Kconfig output"
           fi
 
-      - name: Rename artifacts
-        shell: sh -x {0}
+      - name: Upload .config (try common paths)
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-output
+          path: |
+            ${{ env.build_dir }}/zephyr/.config
+            ${{ env.build_dir }}/.config
+            ${{ env.build_dir }}/zephyr/zephyr/.config
+          if-no-files-found: warn
+
+      - name: Rename firmware artifacts
         run: |
           mkdir "${{ env.build_dir }}/artifacts"
           if [ -f "${{ env.build_dir }}/zephyr/zmk.uf2" ]; then
-            cp "${{ env.build_dir }}/zephyr/zmk.uf2" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.uf2"
-          elif [ -f "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" ]; then
-            cp "${{ env.build_dir }}/zephyr/zmk.${{ inputs.fallback_binary }}" "${{ env.build_dir }}/artifacts/${{ env.artifact_name }}.${{ inputs.fallback_binary }}"
+            cp "${{ env.build_dir }}/zephyr/zmk.uf2" "${{ env.build_dir }}/artifacts/firmware.uf2"
+          elif [ -f "${{ env.build_dir }}/zephyr/zmk.bin" ]; then
+            cp "${{ env.build_dir }}/zephyr/zmk.bin" "${{ env.build_dir }}/artifacts/firmware.bin"
           fi
 
-      # ★ ここで .config をArtifactに出す
-      - name: Upload .config
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
-        with:
-          name: config-${{ env.artifact_name }}
-          path: ${{ env.build_dir }}/zephyr/.config
-
-      - name: Archive (${{ env.display_name }})
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifact-${{ env.artifact_name }}
-          path: ${{ env.build_dir }}/artifacts
-
-  merge:
-    runs-on: ubuntu-latest
-    needs: build
-    name: Merge Output Artifacts
-    steps:
-      - name: Merge Artifacts
-        uses: actions/upload-artifact/merge@v4
         with:
           name: firmware
-          pattern: artifact-*
-          delete-merged: true
+          path: ${{ env.build_dir }}/artifacts
